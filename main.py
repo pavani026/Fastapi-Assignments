@@ -1,12 +1,9 @@
-from fastapi import FastAPI, Query, Path
-from pydantic import BaseModel, Field
-from typing import Optional, List
+from fastapi import FastAPI, HTTPException
+from typing import Optional
 
 app = FastAPI()
 
-# -----------------------------
-# Sample Product Data
-# -----------------------------
+# Example initial products list (from Day 4 session)
 products = [
     {"id": 1, "name": "Wireless Mouse", "price": 499, "category": "Electronics", "in_stock": True},
     {"id": 2, "name": "Notebook", "price": 99, "category": "Stationery", "in_stock": True},
@@ -14,144 +11,76 @@ products = [
     {"id": 4, "name": "Pen Set", "price": 49, "category": "Stationery", "in_stock": True},
 ]
 
-feedback_list = []
-orders = []
-order_counter = 0
+@app.post("/products")
+def add_product(name: str, price: int, category: str, in_stock: bool):
+    # Check duplicate
+    for p in products:
+        if p["name"].lower() == name.lower():
+            raise HTTPException(status_code=400, detail="Duplicate product name")
 
-# -----------------------------
-# Q1: Filter Products by min_price
-# -----------------------------
-@app.get("/products/filter")
-def filter_products(
-    min_price: Optional[int] = Query(None),
-    max_price: Optional[int] = Query(None),
-    category: Optional[str] = Query(None)
-):
-    result = products
-    if min_price is not None:
-        result = [p for p in result if p["price"] >= min_price]
-    if max_price is not None:
-        result = [p for p in result if p["price"] <= max_price]
-    if category is not None:
-        result = [p for p in result if p["category"].lower() == category.lower()]
-    return result
+    new_id = max([p["id"] for p in products]) + 1 if products else 1
+    new_product = {"id": new_id, "name": name, "price": price, "category": category, "in_stock": in_stock}
+    products.append(new_product)
+    return {"message": "Product added", "product": new_product}
 
-# -----------------------------
-# Q2: Get Only Price of Product
-# -----------------------------
-@app.get("/products/{product_id}/price")
-def get_product_price(product_id: int = Path(...)):
+@app.put("/products/{product_id}")
+def update_product(product_id: int, price: Optional[int] = None, in_stock: Optional[bool] = None):
     for p in products:
         if p["id"] == product_id:
-            return {"name": p["name"], "price": p["price"]}
-    return {"error": "Product not found"}
+            if price is not None:
+                p["price"] = price
+            if in_stock is not None:
+                p["in_stock"] = in_stock
+            return {"message": "Product updated", "product": p}
+    raise HTTPException(status_code=404, detail="Product not found")
 
-# -----------------------------
-# Q3: Customer Feedback
-# -----------------------------
-class CustomerFeedback(BaseModel):
-    customer_name: str = Field(..., min_length=2)
-    product_id: int = Field(..., gt=0)
-    rating: int = Field(..., ge=1, le=5)
-    comment: Optional[str] = Field(None, max_length=300)
+@app.delete("/products/{product_id}")
+def delete_product(product_id: int):
+    for p in products:
+        if p["id"] == product_id:
+            products.remove(p)
+            return {"message": f"Product '{p['name']}' deleted"}
+    raise HTTPException(status_code=404, detail="Product not found")
 
-@app.post("/feedback")
-def submit_feedback(feedback: CustomerFeedback):
-    feedback_list.append(feedback.dict())
-    return {
-        "message": "Feedback submitted successfully",
-        "feedback": feedback.dict(),
-        "total_feedback": len(feedback_list)
-    }
+@app.get("/products")
+def get_products():
+    return {"products": products, "total": len(products)}
 
-# -----------------------------
-# Q4: Product Summary Dashboard
-# -----------------------------
-@app.get("/products/summary")
-def product_summary():
-    total = len(products)
-    in_stock = sum(1 for p in products if p["in_stock"])
-    out_stock = total - in_stock
-    cheapest = min(products, key=lambda p: p["price"])
-    expensive = max(products, key=lambda p: p["price"])
-    categories = list(set(p["category"] for p in products))
+
+@app.get("/products/audit")
+def audit_products():
+    total_products = len(products)
+    in_stock_items = [p for p in products if p["in_stock"]]
+    out_of_stock_items = [p for p in products if not p["in_stock"]]
+
+    total_stock_value = sum(p["price"] * 10 for p in in_stock_items)
+    most_expensive = max(products, key=lambda x: x["price"]) if products else None
 
     return {
-        "total_products": total,
-        "in_stock_count": in_stock,
-        "out_of_stock_count": out_stock,
-        "most_expensive": {"name": expensive["name"], "price": expensive["price"]},
-        "cheapest": {"name": cheapest["name"], "price": cheapest["price"]},
-        "categories": categories
+        "total_products": total_products,
+        "in_stock_count": len(in_stock_items),
+        "out_of_stock_names": [p["name"] for p in out_of_stock_items],
+        "total_stock_value": total_stock_value,
+        "most_expensive": {"name": most_expensive["name"], "price": most_expensive["price"]} if most_expensive else None
     }
 
-# -----------------------------
-# Q5: Bulk Order
-# -----------------------------
-class OrderItem(BaseModel):
-    product_id: int = Field(..., gt=0)
-    quantity: int = Field(..., ge=1, le=50)
+@app.put("/products/discount")
+def apply_discount(category: str, discount_percent: int):
+    if discount_percent < 1 or discount_percent > 99:
+        raise HTTPException(status_code=400, detail="Discount percent must be between 1 and 99")
 
-class BulkOrder(BaseModel):
-    company_name: str = Field(..., min_length=2)
-    contact_email: str = Field(..., min_length=5)   # simplified to str
-    items: List[OrderItem]
+    updated = []
+    for p in products:
+        if p["category"].lower() == category.lower():
+            new_price = int(p["price"] * (1 - discount_percent / 100))
+            p["price"] = new_price
+            updated.append({"id": p["id"], "name": p["name"], "new_price": new_price})
 
-@app.post("/orders/bulk")
-def place_bulk_order(order: BulkOrder):
-    confirmed = []
-    failed = []
-    grand_total = 0
 
-    for item in order.items:
-        product = next((p for p in products if p["id"] == item.product_id), None)
-        if not product:
-            failed.append({"product_id": item.product_id, "reason": "Product not found"})
-        elif not product["in_stock"]:
-            failed.append({"product_id": item.product_id, "reason": f"{product['name']} is out of stock"})
-        else:
-            subtotal = product["price"] * item.quantity
-            confirmed.append({"product": product["name"], "qty": item.quantity, "subtotal": subtotal})
-            grand_total += subtotal
+@app.get("/products/{product_id}")
+def get_product(product_id: int):
+    for p in products:
+        if p["id"] == product_id:
+            return p
+    raise HTTPException(status_code=404, detail="Product not found")
 
-    return {
-        "company": order.company_name,
-        "confirmed": confirmed,
-        "failed": failed,
-        "grand_total": grand_total
-    }
-
-# -----------------------------
-# BONUS: Order Status Tracker
-# -----------------------------
-class SimpleOrder(BaseModel):
-    product_id: int
-    quantity: int
-
-@app.post("/orders")
-def create_order(order: SimpleOrder):
-    global order_counter
-    order_counter += 1
-    new_order = {
-        "id": order_counter,
-        "product_id": order.product_id,
-        "quantity": order.quantity,
-        "status": "pending"
-    }
-    orders.append(new_order)
-    return new_order
-
-@app.get("/orders/{order_id}")
-def get_order(order_id: int):
-    for o in orders:
-        if o["id"] == order_id:
-            return o
-    return {"error": "Order not found"}
-
-@app.patch("/orders/{order_id}/confirm")
-def confirm_order(order_id: int):
-    for o in orders:
-        if o["id"] == order_id:
-            o["status"] = "confirmed"
-            return o
-    return {"error": "Order not found"}
